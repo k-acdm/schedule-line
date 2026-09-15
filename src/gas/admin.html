@@ -217,12 +217,12 @@
   <!-- 結果表示エリア -->
   <div id="result"></div>
 
-  <!-- 配信操作（段階3で実装。今は無効プレースホルダ） -->
+  <!-- 配信操作 -->
   <div class="card">
     <div class="btn-row">
-      <button class="btn btn-secondary" disabled title="段階3で実装">テスト配信（準備中）</button>
-      <button class="btn btn-danger" disabled title="段階3で実装">本配信（準備中）</button>
-      <span class="hint">配信機能は段階3で実装予定です。</span>
+      <button class="btn btn-secondary" id="testBtn" onclick="testSend()">🧪 テスト配信</button>
+      <button class="btn btn-danger" id="realBtn" onclick="executeReal()">🚀 本配信</button>
+      <span class="hint">テスト配信は先頭1名分をふくちさんのLINEにのみ送ります。本配信は配信対象全員へ実際に送信します。</span>
     </div>
   </div>
 
@@ -336,6 +336,105 @@
       return '<span class="badge badge-notenrolled">在籍FALSE（スキップ）</span>';
     }
     return '<span class="badge badge-none">' + escapeHtml(w.message) + '</span>';
+  }
+
+  // === 配信 ===
+  function getGreeting() {
+    return document.getElementById('greeting').value.trim();
+  }
+
+  function testSend() {
+    var greeting = getGreeting();
+    if (!greeting) { alert('あいさつ文を入力してください。'); return; }
+    if (!confirm('配信対象の先頭1名分の画像を、\nふくちさんのLINEにテスト配信します。\n\nよろしいですか？')) return;
+    var btn = document.getElementById('testBtn');
+    btn.disabled = true;
+    google.script.run
+      .withSuccessHandler(function(res) {
+        btn.disabled = false;
+        if (res && res.success) {
+          alert('✅ テスト配信しました。\n対象: ' + res.name + '\n（' + res.fileName + '）\n\nふくちさんのLINEをご確認ください。');
+        } else {
+          alert('❌ テスト配信に失敗しました。\n' + ((res && res.error) || '不明なエラー'));
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        alert('❌ エラー: ' + ((err && err.message) ? err.message : err));
+      })
+      .testSendSchedule(greeting);
+  }
+
+  function executeReal() {
+    var greeting = getGreeting();
+    if (!greeting) { alert('あいさつ文を入力してください。'); return; }
+    var btn = document.getElementById('realBtn');
+    btn.disabled = true;
+
+    // 事前確認：配信対象を取得して内容を提示
+    google.script.run
+      .withSuccessHandler(function(data) {
+        var s = data.summary;
+        if (s.deliverCount === 0) {
+          btn.disabled = false;
+          alert('配信対象がいません。本配信を中止しました。');
+          return;
+        }
+        var msg = '【本配信の事前確認】\n\n';
+        msg += '配信対象：' + s.deliverCount + '名\n';
+        msg += '送信予定：' + s.totalMessages + '通\n';
+        if (s.warningCount > 0) msg += '警告：' + s.warningCount + '件（配信対象外）\n';
+        msg += '\n⚠️ ' + s.totalMessages + '通を実際にLINE配信します。\n';
+        msg += '配信したメッセージは取り消せません。\n\n';
+        msg += '続行しますか？';
+        if (!confirm(msg)) { btn.disabled = false; return; }
+
+        var finalConfirm = prompt('最終確認：「配信」と入力してください');
+        if (finalConfirm !== '配信') {
+          btn.disabled = false;
+          alert('入力が一致しなかったため中止しました。');
+          return;
+        }
+
+        document.getElementById('result').innerHTML =
+          '<div class="loading">配信中…（' + s.totalMessages + '通）しばらくお待ちください。</div>';
+        google.script.run
+          .withSuccessHandler(function(result) {
+            btn.disabled = false;
+            renderSendResult(result);
+          })
+          .withFailureHandler(function(err) {
+            btn.disabled = false;
+            renderError(err);
+          })
+          .executeScheduleDelivery(greeting);
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        renderError(err);
+      })
+      .getDeliveryTargets();
+  }
+
+  function renderSendResult(r) {
+    var html = '<div class="card"><h2 style="margin-top:0;">配信結果</h2><div class="summary">' +
+      '<div class="summary-item"><span class="summary-label">総通数</span>' +
+        '<span class="summary-value">' + r.total + '</span> 通</div>' +
+      '<div class="summary-item"><span class="summary-label">成功</span>' +
+        '<span class="summary-value ok">' + r.success + '</span> 通</div>' +
+      '<div class="summary-item"><span class="summary-label">失敗</span>' +
+        '<span class="summary-value warn">' + r.failed + '</span> 通</div>' +
+      '</div>';
+    if (r.errors && r.errors.length) {
+      html += '<div style="margin-top:14px;"><strong>エラー詳細</strong><ul style="margin:8px 0 0;padding-left:20px;">';
+      r.errors.forEach(function(e) {
+        html += '<li class="file-name" style="margin-bottom:4px;">' + escapeHtml(e) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+    html += '</div>';
+    document.getElementById('result').innerHTML = html;
+    alert('配信完了\n総通数: ' + r.total + '\n成功: ' + r.success + '\n失敗: ' + r.failed);
   }
 
   function escapeHtml(s) {

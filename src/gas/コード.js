@@ -193,6 +193,20 @@ function _normalizeName(s) {
 
 /**
  * 配信対象の一覧を返す（管理画面から google.script.run で呼ばれる）。
+ * プライバシー配慮のため、LINE_USER_ID の実値と fileId は返さず「有無(boolean)」のみ返す。
+ * @return {{targets: Object[], warnings: Object[], summary: Object}}
+ */
+function getDeliveryTargets() {
+  var d = _computeDelivery();
+  return {
+    targets: d.targets.map(_sanitizeRecord),
+    warnings: d.warnings.map(_sanitizeRecord),
+    summary: d.summary
+  };
+}
+
+/**
+ * 配信計算の中核（サーバー内部用。実IDと fileId を含む）。
  *
  * IMAGE_FOLDER_ID 内の全JPGを走査し、ファイル名（拡張子除く）を生徒氏名として
  * Recipients シートと照合（氏名はスペース無視）。以下に分類する。
@@ -205,11 +219,9 @@ function _normalizeName(s) {
  *   - 各生徒の sendCount は当該生徒内のユニーク数
  *   - summary.totalMessages は配信対象（正常）全体でのユニークID数（全体重複除去）
  *
- * ※ プライバシー配慮のため、LINE_USER_ID の実値は返さず「有無(boolean)」のみ返す。
- *
  * @return {{targets: Object[], warnings: Object[], summary: Object}}
  */
-function getDeliveryTargets() {
+function _computeDelivery() {
   var folder = DriveApp.getFolderById(_getRequiredProp('IMAGE_FOLDER_ID'));
   var recipients = _getRecipientsMap();
 
@@ -229,6 +241,9 @@ function getDeliveryTargets() {
     var record = {
       name: rec ? rec.name : String(parsed.base).trim(),
       fileName: file.getName(),
+      fileId: file.getId(),
+      studentId: '',
+      guardianId: '',
       hasStudentId: false,
       hasGuardianId: false,
       enrolled: false,
@@ -245,6 +260,8 @@ function getDeliveryTargets() {
       continue;
     }
 
+    record.studentId = rec.studentId;
+    record.guardianId = rec.guardianId;
     record.hasStudentId = rec.studentId !== '';
     record.hasGuardianId = rec.guardianId !== '';
     record.enrolled = rec.enrolled;
@@ -286,6 +303,24 @@ function getDeliveryTargets() {
       totalMessages: Object.keys(globalIds).length,
       warningCount: warnings.length
     }
+  };
+}
+
+/**
+ * 画面返却用に機微情報（LINE_USER_ID実値・fileId）を落としたコピーを返す。
+ * @param {Object} r
+ * @return {Object}
+ */
+function _sanitizeRecord(r) {
+  return {
+    name: r.name,
+    fileName: r.fileName,
+    hasStudentId: r.hasStudentId,
+    hasGuardianId: r.hasGuardianId,
+    enrolled: r.enrolled,
+    sendCount: r.sendCount,
+    status: r.status,
+    message: r.message
   };
 }
 
@@ -380,4 +415,176 @@ function _escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ============================================
+// 【段階3】LINE配信（テスト配信・本配信）
+// ============================================
+
+/**
+ * テスト配信：配信対象の先頭1名分の画像を、ADMIN_LINE_USER_ID（ふくちさん）宛に送る。
+ * 全員には送らない。あいさつ文の冒頭に「🧪 テスト配信」を付与する。
+ *
+ * @param {string} greetingText - あいさつ文
+ * @return {{success:boolean, name?:string, fileName?:string, error?:string}}
+ */
+function testSendSchedule(greetingText) {
+  var greeting = _trim(greetingText);
+  if (!greeting) {
+    return { success: false, error: 'あいさつ文を入力してください。' };
+  }
+
+  var adminId = _getRequiredProp('ADMIN_LINE_USER_ID');
+
+  var d = _computeDelivery();
+  if (d.targets.length === 0) {
+    return { success: false, error: '配信対象がいません（テスト送信できません）。' };
+  }
+
+  var first = d.targets[0];
+  var testGreeting = '🧪 テスト配信\n' + greeting;
+  var messages = _buildScheduleMessages(testGreeting, first.fileId);
+  var res = _pushLineMessages(adminId, messages);
+
+  return {
+    success: res.success,
+    name: first.name,
+    fileName: first.fileName,
+    error: res.success ? undefined : res.error
+  };
+}
+
+/**
+ * 本配信：配信対象の各生徒について、生徒本人ID＋保護者ID（空でないもの）へ
+ * 「あいさつ文 → その生徒の画像」を送信する。
+ *
+ * 【重複除去】1つの LINE_USER_ID には（全体を通して）1回だけ送る。
+ *   - 生徒本人と保護者は別IDなので、それぞれにその生徒の画像が届く
+ *   - 万一、全体で同一IDが複数回登場した場合は、最初に登場した1回のみ送る
+ *     （＝ そのIDに紐づく最初の生徒の画像を送る）
+ *   - 送信通数 = 全体でのユニークID数（getDeliveryTargets の totalMessages と一致）
+ *
+ * @param {string} greetingText - あいさつ文（必須）
+ * @return {{total:number, success:number, failed:number, errors:string[], targetCount:number}}
+ */
+function executeScheduleDelivery(greetingText) {
+  var greeting = _trim(greetingText);
+  if (!greeting) {
+    throw new Error('あいさつ文を入力してください（本配信には必須です）。');
+  }
+
+  var d = _computeDelivery();
+  if (d.targets.length === 0) {
+    throw new Error('配信対象がいません。本配信を中止しました。');
+  }
+
+  // 送信リストを構築（全体でユニークIDに絞る。登場順で最初の1回のみ）
+  var seen = {};
+  var sends = []; // { userId, name, fileId }
+  d.targets.forEach(function(t) {
+    [t.studentId, t.guardianId].forEach(function(id) {
+      if (id && !seen[id]) {
+        seen[id] = true;
+        sends.push({ userId: id, name: t.name, fileId: t.fileId });
+      }
+    });
+  });
+
+  var total = sends.length;
+  var success = 0;
+  var failed = 0;
+  var errors = [];
+
+  for (var i = 0; i < sends.length; i++) {
+    var s = sends[i];
+    var messages = _buildScheduleMessages(greeting, s.fileId);
+    var res = _pushLineMessages(s.userId, messages);
+    if (res.success) {
+      success++;
+    } else {
+      failed++;
+      errors.push(s.name + ': ' + (res.error || '不明なエラー'));
+    }
+    // レート制限緩和（最後の1件の後はスリープ不要）
+    if (i < sends.length - 1) {
+      Utilities.sleep(500);
+    }
+  }
+
+  return {
+    total: total,
+    success: success,
+    failed: failed,
+    errors: errors,
+    targetCount: d.targets.length
+  };
+}
+
+/**
+ * 「あいさつ文 → 画像」の2メッセージ配列を組み立てる。
+ * 画像URLは段階1で確定した公開画像URL（lh3/thumbnail 直リンク）を使用する。
+ * ※ ?image= はHTMLプレビューを返すためLINEには使えない。fileId から直URLを生成する。
+ *
+ * @param {string} greeting - 本文（テスト時は冒頭に🧪付与済み）
+ * @param {string} fileId
+ * @return {Object[]} LINE messages
+ */
+function _buildScheduleMessages(greeting, fileId) {
+  var urls = _buildImageUrls(fileId);
+  return [
+    { type: 'text', text: greeting },
+    {
+      type: 'image',
+      originalContentUrl: urls.originalContentUrl,
+      previewImageUrl: urls.previewImageUrl
+    }
+  ];
+}
+
+/**
+ * LINE Messaging API の push で複数メッセージを1回のリクエストで送る。
+ * @param {string} userId - 宛先 LINE_USER_ID
+ * @param {Object[]} messages - LINE messages 配列（最大5件／API仕様）
+ * @return {{success:boolean, status?:number, error?:string}}
+ */
+function _pushLineMessages(userId, messages) {
+  var token = _getLineMessagingAccessToken();
+  if (!token) {
+    return { success: false, error: 'LINE_MESSAGING_CHANNEL_ACCESS_TOKEN 未設定' };
+  }
+  try {
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + token },
+      payload: JSON.stringify({ to: userId, messages: messages }),
+      muteHttpExceptions: true
+    });
+    var status = res.getResponseCode();
+    if (status === 200) {
+      return { success: true, status: status };
+    }
+    return {
+      success: false,
+      status: status,
+      error: 'HTTP ' + status + ': ' + res.getContentText().substring(0, 200)
+    };
+  } catch (e) {
+    return { success: false, error: String(e) };
+  }
+}
+
+/**
+ * LINE Messaging API のチャネルアクセストークンを取得。
+ * @return {string}
+ */
+function _getLineMessagingAccessToken() {
+  try {
+    return String(
+      PropertiesService.getScriptProperties()
+        .getProperty('LINE_MESSAGING_CHANNEL_ACCESS_TOKEN') || ''
+    ).trim();
+  } catch (e) {
+    return '';
+  }
 }
