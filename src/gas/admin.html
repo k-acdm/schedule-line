@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic", sans-serif;
+    margin: 0;
+    padding: 20px;
+    background: #f5f5f5;
+    color: #333;
+  }
+  h1 {
+    font-size: 22px;
+    margin: 0 0 4px;
+    color: #2c3e50;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #7f8c8d;
+    margin: 0 0 20px;
+  }
+  h2 {
+    font-size: 18px;
+    margin: 24px 0 12px;
+    color: #34495e;
+  }
+  .card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .field-label {
+    font-size: 13px;
+    color: #555;
+    font-weight: 600;
+    display: block;
+    margin-bottom: 8px;
+  }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 96px;
+    padding: 12px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.6;
+    resize: vertical;
+    color: #333;
+  }
+  textarea:focus {
+    outline: none;
+    border-color: #3498db;
+  }
+  .actions {
+    margin: 8px 0 4px;
+  }
+  .btn {
+    padding: 10px 20px;
+    background: #3498db;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn:hover { background: #2980b9; }
+  .btn:disabled {
+    background: #bdc3c7;
+    cursor: not-allowed;
+  }
+  .btn-secondary {
+    background: #95a5a6;
+  }
+  .btn-secondary:hover { background: #7f8c8d; }
+  .btn-danger { background: #e74c3c; }
+  .btn-danger:hover { background: #c0392b; }
+  .btn-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .hint {
+    font-size: 12px;
+    color: #95a5a6;
+  }
+
+  /* サマリー */
+  .summary {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+  }
+  .summary-item { }
+  .summary-label {
+    font-size: 13px;
+    color: #7f8c8d;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .summary-value {
+    font-size: 26px;
+    font-weight: 700;
+    color: #2c3e50;
+  }
+  .summary-value.ok { color: #27ae60; }
+  .summary-value.msg { color: #2980b9; }
+  .summary-value.warn { color: #e67e22; }
+
+  /* テーブル */
+  table {
+    width: 100%;
+    background: white;
+    border-collapse: collapse;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    margin-bottom: 8px;
+  }
+  th {
+    background: #ecf0f1;
+    padding: 11px 12px;
+    text-align: left;
+    font-size: 13px;
+    color: #555;
+    border-bottom: 1px solid #ddd;
+  }
+  td {
+    padding: 11px 12px;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 14px;
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  td.num {
+    text-align: center;
+    font-weight: 600;
+    color: #2c3e50;
+  }
+  .file-name {
+    color: #7f8c8d;
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", monospace;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .badge-student { background: #e8f4f8; color: #2980b9; }
+  .badge-guardian { background: #fef5e7; color: #d68910; }
+  .badge-none { background: #f0f0f0; color: #95a5a6; }
+
+  .badge-nomatch { background: #fdecea; color: #c0392b; }
+  .badge-noid { background: #fef5e7; color: #d68910; }
+  .badge-notenrolled { background: #eef0f1; color: #7f8c8d; }
+
+  .warn-section { }
+  .warn-nomatch td:first-child { box-shadow: inset 3px 0 0 #e74c3c; }
+  .warn-noid td:first-child { box-shadow: inset 3px 0 0 #e67e22; }
+  .warn-notenrolled td:first-child { box-shadow: inset 3px 0 0 #bdc3c7; }
+
+  .loading {
+    text-align: center;
+    padding: 32px;
+    color: #7f8c8d;
+  }
+  .empty {
+    text-align: center;
+    padding: 24px;
+    color: #7f8c8d;
+    background: white;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 14px;
+  }
+  .error-box {
+    background: #fdecea;
+    color: #c0392b;
+    border: 1px solid #f5c6cb;
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 14px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+  <h1>schedule-line 授業日程表配信</h1>
+  <p class="subtitle">春日部アカデミー ／ 授業日程表JPGを生徒・保護者へLINE配信</p>
+
+  <!-- あいさつ文 -->
+  <div class="card">
+    <label class="field-label" for="greeting">あいさつ文（画像と一緒に送信する本文）</label>
+    <textarea id="greeting" placeholder="保護者・生徒の皆様&#10;新しい授業日程表をお送りします。ご確認ください。"></textarea>
+  </div>
+
+  <!-- プレビュー操作 -->
+  <div class="card">
+    <div class="btn-row">
+      <button class="btn" id="previewBtn" onclick="loadTargets()">配信対象プレビュー</button>
+      <span class="hint">画像フォルダのJPGとRecipientsシートを照合します（この段階では配信しません）。</span>
+    </div>
+  </div>
+
+  <!-- 結果表示エリア -->
+  <div id="result"></div>
+
+  <!-- 配信操作（段階3で実装。今は無効プレースホルダ） -->
+  <div class="card">
+    <div class="btn-row">
+      <button class="btn btn-secondary" disabled title="段階3で実装">テスト配信（準備中）</button>
+      <button class="btn btn-danger" disabled title="段階3で実装">本配信（準備中）</button>
+      <span class="hint">配信機能は段階3で実装予定です。</span>
+    </div>
+  </div>
+
+<script>
+  function loadTargets() {
+    var btn = document.getElementById('previewBtn');
+    btn.disabled = true;
+    document.getElementById('result').innerHTML =
+      '<div class="loading">照合中…</div>';
+    google.script.run
+      .withSuccessHandler(function(data) {
+        btn.disabled = false;
+        renderResult(data);
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        renderError(err);
+      })
+      .getDeliveryTargets();
+  }
+
+  function renderError(err) {
+    var msg = (err && err.message) ? err.message : String(err);
+    document.getElementById('result').innerHTML =
+      '<div class="error-box">エラー: ' + escapeHtml(msg) + '</div>';
+  }
+
+  function renderResult(data) {
+    var s = data.summary;
+    var html = '';
+
+    // サマリー
+    html += '<div class="card"><div class="summary">' +
+      '<div class="summary-item"><span class="summary-label">配信対象</span>' +
+        '<span class="summary-value ok">' + s.deliverCount + '</span> 名</div>' +
+      '<div class="summary-item"><span class="summary-label">送信予定</span>' +
+        '<span class="summary-value msg">' + s.totalMessages + '</span> 通</div>' +
+      '<div class="summary-item"><span class="summary-label">警告</span>' +
+        '<span class="summary-value warn">' + s.warningCount + '</span> 件</div>' +
+      '</div></div>';
+
+    // 配信対象（正常）
+    html += '<h2>配信対象（' + data.targets.length + '名）</h2>';
+    if (data.targets.length === 0) {
+      html += '<div class="empty">配信対象がありません。</div>';
+    } else {
+      html += '<table><thead><tr>' +
+        '<th>氏名</th><th>画像ファイル</th><th>送信先</th><th style="text-align:center;">送信通数</th>' +
+        '</tr></thead><tbody>';
+      data.targets.forEach(function(t) {
+        html += '<tr>' +
+          '<td>' + escapeHtml(t.name) + '</td>' +
+          '<td class="file-name">' + escapeHtml(t.fileName) + '</td>' +
+          '<td>' + destBadges(t) + '</td>' +
+          '<td class="num">' + t.sendCount + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    // 警告・スキップ
+    html += '<h2>警告・スキップ（' + data.warnings.length + '件）</h2>';
+    if (data.warnings.length === 0) {
+      html += '<div class="empty">警告はありません。</div>';
+    } else {
+      html += '<table class="warn-section"><thead><tr>' +
+        '<th>氏名 / 画像ファイル</th><th>状態</th><th>送信先ID</th>' +
+        '</tr></thead><tbody>';
+      data.warnings.forEach(function(w) {
+        html += '<tr class="warn-' + w.status + '">' +
+          '<td>' + escapeHtml(w.name) +
+            '<br><span class="file-name">' + escapeHtml(w.fileName) + '</span></td>' +
+          '<td>' + statusBadge(w) + '</td>' +
+          '<td>' + idPresence(w) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    document.getElementById('result').innerHTML = html;
+  }
+
+  function destBadges(t) {
+    var out = '';
+    if (t.hasStudentId) out += '<span class="badge badge-student">生徒</span>';
+    if (t.hasGuardianId) out += '<span class="badge badge-guardian">保護者</span>';
+    if (!out) out = '<span class="badge badge-none">なし</span>';
+    return out;
+  }
+
+  function idPresence(w) {
+    if (w.status === 'nomatch') return '<span class="badge badge-none">—</span>';
+    var out = '';
+    out += w.hasStudentId
+      ? '<span class="badge badge-student">生徒</span>'
+      : '<span class="badge badge-none">生徒なし</span>';
+    out += w.hasGuardianId
+      ? '<span class="badge badge-guardian">保護者</span>'
+      : '<span class="badge badge-none">保護者なし</span>';
+    return out;
+  }
+
+  function statusBadge(w) {
+    if (w.status === 'nomatch') {
+      return '<span class="badge badge-nomatch">対応表に氏名なし</span>';
+    }
+    if (w.status === 'noid') {
+      return '<span class="badge badge-noid">送信先ID未登録</span>';
+    }
+    if (w.status === 'notenrolled') {
+      return '<span class="badge badge-notenrolled">在籍FALSE（スキップ）</span>';
+    }
+    return '<span class="badge badge-none">' + escapeHtml(w.message) + '</span>';
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+</script>
+</body>
+</html>

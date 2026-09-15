@@ -38,13 +38,15 @@ function doGet(e) {
   e = e || {};
   var params = e.parameter || {};
 
-  // 画像配信（ブラウザ確認用プレビュー）
+  // 【段階1】画像配信（ブラウザ確認用プレビュー）※この分岐を壊さないこと
   if (params.image) {
     return _serveImage(params.image);
   }
 
-  // それ以外は管理画面（段階2で実装。今は準備中プレースホルダ）
-  return _adminPlaceholder();
+  // 【段階2】管理画面
+  return HtmlService.createHtmlOutputFromFile('admin')
+    .setTitle('schedule-line 授業日程表配信')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
 /**
@@ -185,21 +187,162 @@ function _normalizeName(s) {
   return String(s).replace(/[\s　]/g, '');
 }
 
+// ============================================
+// 【段階2】配信対象の照合
+// ============================================
+
 /**
- * 管理画面プレースホルダ（段階2で実装）。
- * @return {HtmlOutput}
+ * 配信対象の一覧を返す（管理画面から google.script.run で呼ばれる）。
+ *
+ * IMAGE_FOLDER_ID 内の全JPGを走査し、ファイル名（拡張子除く）を生徒氏名として
+ * Recipients シートと照合（氏名はスペース無視）。以下に分類する。
+ *   a) JPGあり + マッチ + 在籍TRUE + ID1つ以上 → 配信対象（正常）      status='ok'
+ *   b) JPGあり + マッチしない                    → 警告「対応表に氏名なし」 status='nomatch'
+ *   c) JPGあり + マッチ + 在籍FALSE              → スキップ「在籍フラグFALSE」status='notenrolled'
+ *   d) JPGあり + マッチ + 在籍TRUE + ID両方空     → 警告「送信先ID未登録」   status='noid'
+ *
+ * 送信予定通数：生徒本人ID・保護者ID（空でないもの）を重複除去したユニークID数。
+ *   - 各生徒の sendCount は当該生徒内のユニーク数
+ *   - summary.totalMessages は配信対象（正常）全体でのユニークID数（全体重複除去）
+ *
+ * ※ プライバシー配慮のため、LINE_USER_ID の実値は返さず「有無(boolean)」のみ返す。
+ *
+ * @return {{targets: Object[], warnings: Object[], summary: Object}}
  */
-function _adminPlaceholder() {
-  return HtmlOutput_(
-    '<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">' +
-    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<title>schedule-line</title></head>' +
-    '<body style="font-family:sans-serif;padding:24px;">' +
-    '<h1>schedule-line</h1>' +
-    '<p>春日部アカデミー 授業日程表 LINE配信ツール</p>' +
-    '<p style="color:#888;">管理画面は準備中です（段階2で実装）。</p>' +
-    '</body></html>'
-  );
+function getDeliveryTargets() {
+  var folder = DriveApp.getFolderById(_getRequiredProp('IMAGE_FOLDER_ID'));
+  var recipients = _getRecipientsMap();
+
+  var targets = [];
+  var warnings = [];
+  var globalIds = {}; // 配信対象全体のユニークID集合
+
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var file = files.next();
+    var parsed = _parseFileName(file.getName());
+    if (!parsed) continue; // JPG以外はスキップ
+
+    var key = _normalizeName(parsed.base);
+    var rec = recipients[key];
+
+    var record = {
+      name: rec ? rec.name : String(parsed.base).trim(),
+      fileName: file.getName(),
+      hasStudentId: false,
+      hasGuardianId: false,
+      enrolled: false,
+      sendCount: 0,
+      status: '',
+      message: ''
+    };
+
+    // b) マッチしない
+    if (!rec) {
+      record.status = 'nomatch';
+      record.message = '対応表に氏名なし';
+      warnings.push(record);
+      continue;
+    }
+
+    record.hasStudentId = rec.studentId !== '';
+    record.hasGuardianId = rec.guardianId !== '';
+    record.enrolled = rec.enrolled;
+
+    // c) 在籍FALSE
+    if (!rec.enrolled) {
+      record.status = 'notenrolled';
+      record.message = '在籍フラグFALSE';
+      warnings.push(record);
+      continue;
+    }
+
+    // d) ID両方空
+    if (rec.studentId === '' && rec.guardianId === '') {
+      record.status = 'noid';
+      record.message = '送信先ID未登録';
+      warnings.push(record);
+      continue;
+    }
+
+    // a) 配信対象（正常）
+    var ids = {};
+    if (rec.studentId !== '') { ids[rec.studentId] = true; globalIds[rec.studentId] = true; }
+    if (rec.guardianId !== '') { ids[rec.guardianId] = true; globalIds[rec.guardianId] = true; }
+    record.sendCount = Object.keys(ids).length;
+    record.status = 'ok';
+    record.message = '配信対象';
+    targets.push(record);
+  }
+
+  targets.sort(_byName);
+  warnings.sort(_byName);
+
+  return {
+    targets: targets,
+    warnings: warnings,
+    summary: {
+      deliverCount: targets.length,
+      totalMessages: Object.keys(globalIds).length,
+      warningCount: warnings.length
+    }
+  };
+}
+
+/**
+ * Recipients シートを読み、正規化氏名 → レコードの map を返す。
+ *   A:生徒氏名 B:生徒LINE_USER_ID C:保護者LINE_USER_ID D:在籍フラグ
+ * @return {Object.<string, {name:string, studentId:string, guardianId:string, enrolled:boolean}>}
+ */
+function _getRecipientsMap() {
+  var ss = SpreadsheetApp.openById(_getRequiredProp('SPREADSHEET_ID'));
+  var sheet = ss.getSheetByName('Recipients');
+  if (!sheet) {
+    throw new Error('スプレッドシートに「Recipients」シートが見つかりません。');
+  }
+  var map = {};
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return map; // ヘッダのみ／空
+
+  var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  for (var i = 0; i < values.length; i++) {
+    var name = values[i][0];
+    if (name === '' || name == null) continue;
+    map[_normalizeName(name)] = {
+      name: String(name).trim(),
+      studentId: _trim(values[i][1]),
+      guardianId: _trim(values[i][2]),
+      enrolled: _isEnrolled(values[i][3])
+    };
+  }
+  return map;
+}
+
+/**
+ * 在籍フラグの解釈。boolean true / "TRUE" / "1" / "○" / "はい" / "在籍" を在籍とみなす。
+ * @param {*} v
+ * @return {boolean}
+ */
+function _isEnrolled(v) {
+  if (v === true) return true;
+  if (v === false || v == null || v === '') return false;
+  return /^(true|1|yes|y|○|はい|在籍)$/i.test(String(v).trim());
+}
+
+/**
+ * セル値を文字列トリム（null安全）。
+ * @param {*} v
+ * @return {string}
+ */
+function _trim(v) {
+  return String(v == null ? '' : v).trim();
+}
+
+/**
+ * name 昇順ソート用コンパレータ。
+ */
+function _byName(a, b) {
+  return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
 }
 
 /**
