@@ -516,8 +516,51 @@ function executeScheduleDelivery(greetingText) {
     success: success,
     failed: failed,
     errors: errors,
-    targetCount: d.targets.length
+    targetCount: d.targets.length,
+    imageCount: d.targets.length + d.warnings.length // フォルダ内JPG総数（削除確認の枚数表示用）
   };
+}
+
+/**
+ * 【段階4】配信済み画像の削除。
+ * IMAGE_FOLDER_ID フォルダ内の JPG のみをゴミ箱へ移動する（復元可能）。
+ *
+ * 安全策：
+ *   - JPG（.jpg/.jpeg 等）以外のファイルは絶対に削除しない
+ *   - フォルダそのものは削除しない（中身のJPGのみ）
+ *   - ゴミ箱移動（setTrashed）なので完全削除ではない
+ *
+ * ※ 本配信成功後にのみ呼ばれる想定（UI側でボタン表示を制御）。
+ *
+ * @return {{deleted:number, failed:number, errors:string[]}}
+ */
+function deleteDeliveredImages() {
+  var folder = DriveApp.getFolderById(_getRequiredProp('IMAGE_FOLDER_ID'));
+
+  // 先にJPGだけを収集（イテレータ走査中の削除による取りこぼしを防ぐ）
+  var jpgFiles = [];
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var f = files.next();
+    if (_parseFileName(f.getName())) { // JPG以外は null → 対象外
+      jpgFiles.push(f);
+    }
+  }
+
+  var deleted = 0;
+  var failed = 0;
+  var errors = [];
+  for (var i = 0; i < jpgFiles.length; i++) {
+    try {
+      jpgFiles[i].setTrashed(true);
+      deleted++;
+    } catch (e) {
+      failed++;
+      errors.push(jpgFiles[i].getName() + ': ' + String(e));
+    }
+  }
+
+  return { deleted: deleted, failed: failed, errors: errors };
 }
 
 /**

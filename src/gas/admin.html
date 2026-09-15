@@ -432,9 +432,40 @@
       });
       html += '</ul></div>';
     }
+    // 配信済み画像の削除ボタン（★本配信成功後にのみ表示。うっかり削除防止）
+    if (r.success > 0) {
+      html += '<div class="btn-row" style="margin-top:18px;padding-top:16px;border-top:1px solid #f0f0f0;">' +
+        '<button class="btn btn-danger" id="deleteBtn" onclick="deleteImages(' + (r.imageCount || 0) + ')">📁 配信済み画像を削除する</button>' +
+        '<span class="hint">配信が完了した日程表画像をゴミ箱へ移動します（復元可能）。</span>' +
+        '</div>';
+    }
     html += '</div>';
     document.getElementById('result').innerHTML = html;
     alert('配信完了\n総通数: ' + r.total + '\n成功: ' + r.success + '\n失敗: ' + r.failed);
+  }
+
+  // === 配信済み画像の削除（本配信成功後のみ） ===
+  function deleteImages(count) {
+    var msg = 'schedule-line-images フォルダ内の日程表画像（' + count + '枚）を削除します。\n' +
+      '（ゴミ箱に移動するので、必要なら復元できます）\n\nよろしいですか？';
+    if (!confirm(msg)) return;
+    var btn = document.getElementById('deleteBtn');
+    btn.disabled = true;
+    btn.textContent = '削除中…';
+    google.script.run
+      .withSuccessHandler(function(res) {
+        var m = res.deleted + '枚の画像を削除しました。';
+        if (res.failed) m += '\n（失敗 ' + res.failed + '枚）';
+        alert(m);
+        btn.textContent = '削除済み（' + res.deleted + '枚）';
+        btn.disabled = true; // 削除後は再押下不可
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled = false;
+        btn.textContent = '📁 配信済み画像を削除する';
+        alert('❌ 削除エラー: ' + ((err && err.message) ? err.message : err));
+      })
+      .deleteDeliveredImages();
   }
 
   function escapeHtml(s) {
