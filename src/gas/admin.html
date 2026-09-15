@@ -457,8 +457,9 @@
         var m = res.deleted + '枚の画像を削除しました。';
         if (res.failed) m += '\n（失敗 ' + res.failed + '枚）';
         alert(m);
-        btn.textContent = '削除済み（' + res.deleted + '枚）';
-        btn.disabled = true; // 削除後は再押下不可
+        btn.textContent = (res.failed ? '再試行（📁削除）' : '削除済み（' + res.deleted + '枚）');
+        btn.disabled = !res.failed; // 失敗が残る場合は再試行できるように
+        renderDeleteDiag(res); // 診断詳細（失敗理由・ログ）を画面に表示
       })
       .withFailureHandler(function(err) {
         btn.disabled = false;
@@ -466,6 +467,39 @@
         alert('❌ 削除エラー: ' + ((err && err.message) ? err.message : err));
       })
       .deleteDeliveredImages();
+  }
+
+  // 削除の診断詳細（失敗理由＋サーバーログ）を結果カードに追記表示
+  function renderDeleteDiag(res) {
+    var box = document.getElementById('result');
+    if (!box) return;
+    var html = '<div class="card">' +
+      '<h2 style="margin-top:0;">画像削除の結果</h2>' +
+      '<div class="summary">' +
+      '<div class="summary-item"><span class="summary-label">削除</span>' +
+        '<span class="summary-value ok">' + res.deleted + '</span> 枚</div>' +
+      '<div class="summary-item"><span class="summary-label">失敗</span>' +
+        '<span class="summary-value warn">' + res.failed + '</span> 枚</div>' +
+      '<div class="summary-item"><span class="summary-label">フォルダ内</span>' +
+        '<span class="summary-value">' + (res.allCount != null ? res.allCount : '?') +
+        '</span> 件（JPG ' + (res.jpgCount != null ? res.jpgCount : '?') + '）</div>' +
+      '</div>';
+    if (res.errors && res.errors.length) {
+      html += '<div style="margin-top:14px;"><strong>失敗理由</strong>' +
+        '<ul style="margin:8px 0 0;padding-left:20px;">';
+      res.errors.forEach(function(e) {
+        html += '<li class="file-name" style="margin-bottom:6px;color:#c0392b;">' + escapeHtml(e) + '</li>';
+      });
+      html += '</ul></div>';
+    }
+    if (res.log && res.log.length) {
+      html += '<details style="margin-top:14px;"><summary style="cursor:pointer;color:#555;">診断ログを表示</summary>' +
+        '<pre style="white-space:pre-wrap;word-break:break-all;background:#f8f9fa;border:1px solid #eee;' +
+        'border-radius:6px;padding:12px;font-size:12px;color:#333;margin-top:8px;">' +
+        escapeHtml(res.log.join('\n')) + '</pre></details>';
+    }
+    html += '</div>';
+    box.insertAdjacentHTML('beforeend', html);
   }
 
   function escapeHtml(s) {

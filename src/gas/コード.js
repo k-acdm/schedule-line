@@ -535,32 +535,96 @@ function executeScheduleDelivery(greetingText) {
  * @return {{deleted:number, failed:number, errors:string[]}}
  */
 function deleteDeliveredImages() {
-  var folder = DriveApp.getFolderById(_getRequiredProp('IMAGE_FOLDER_ID'));
+  var log = []; // 戻り値にも含める診断ログ（画面でも確認できるように）
+  function L(msg) { Logger.log(msg); log.push(msg); }
 
-  // 先にJPGだけを収集（イテレータ走査中の削除による取りこぼしを防ぐ）
+  var folderId = _getRequiredProp('IMAGE_FOLDER_ID');
+  L('▼ deleteDeliveredImages 開始');
+  L('IMAGE_FOLDER_ID = ' + folderId);
+  L('実行ユーザー(有効) = ' + _safe(function() { return Session.getEffectiveUser().getEmail(); }));
+
+  var folder;
+  try {
+    folder = DriveApp.getFolderById(folderId);
+  } catch (e) {
+    L('!! フォルダ取得に失敗: ' + _errStr(e));
+    return { deleted: 0, failed: 0, errors: ['フォルダ取得失敗: ' + _errStr(e)], log: log };
+  }
+  L('フォルダ名 = ' + _safe(function() { return folder.getName(); }));
+
+  // フォルダ内の全ファイルを列挙し、JPG判定の結果を1件ずつログ
   var jpgFiles = [];
+  var allCount = 0;
   var files = folder.getFiles();
   while (files.hasNext()) {
     var f = files.next();
-    if (_parseFileName(f.getName())) { // JPG以外は null → 対象外
-      jpgFiles.push(f);
-    }
+    allCount++;
+    var name = _safe(function() { return f.getName(); });
+    var mime = _safe(function() { return f.getMimeType(); });
+    var isJpg = !!_parseFileName(name);
+    L('  [' + allCount + '] name="' + name + '" mime=' + mime + ' → JPG判定=' + isJpg);
+    if (isJpg) jpgFiles.push(f);
   }
+  L('フォルダ内 全ファイル数 = ' + allCount + ' / JPG対象数 = ' + jpgFiles.length);
 
   var deleted = 0;
   var failed = 0;
   var errors = [];
   for (var i = 0; i < jpgFiles.length; i++) {
+    var jf = jpgFiles[i];
+    var jname = _safe(function() { return jf.getName(); });
+    var jid = _safe(function() { return jf.getId(); });
+    var jowner = _safe(function() { var o = jf.getOwner(); return o ? o.getEmail() : '(取得不可)'; });
+    L('  → 削除試行: name="' + jname + '" id=' + jid + ' owner=' + jowner);
     try {
-      jpgFiles[i].setTrashed(true);
+      jf.setTrashed(true);
       deleted++;
+      L('    ✓ setTrashed(true) 成功');
     } catch (e) {
       failed++;
-      errors.push(jpgFiles[i].getName() + ': ' + String(e));
+      var msg = _errStr(e);
+      errors.push(jname + ' (id=' + jid + '): ' + msg);
+      L('    ✗ setTrashed 失敗: ' + msg);
     }
   }
 
-  return { deleted: deleted, failed: failed, errors: errors };
+  L('▲ 完了: deleted=' + deleted + ' failed=' + failed + ' allFiles=' + allCount + ' jpg=' + jpgFiles.length);
+  return {
+    deleted: deleted,
+    failed: failed,
+    errors: errors,
+    allCount: allCount,
+    jpgCount: jpgFiles.length,
+    log: log
+  };
+}
+
+/**
+ * 例外を可能な限り詳細な文字列にする（message / name / stack）。
+ * @param {*} e
+ * @return {string}
+ */
+function _errStr(e) {
+  if (e == null) return '(null)';
+  var parts = [];
+  if (e.name) parts.push(String(e.name));
+  if (e.message) parts.push(String(e.message)); else parts.push(String(e));
+  if (e.stack) parts.push('stack: ' + String(e.stack).split('\n').slice(0, 3).join(' | '));
+  return parts.join(' / ');
+}
+
+/**
+ * getter 等を安全に呼ぶ（例外時は理由を文字列で返す）。
+ * @param {function} fn
+ * @return {string}
+ */
+function _safe(fn) {
+  try {
+    var v = fn();
+    return (v == null) ? '(null)' : String(v);
+  } catch (e) {
+    return '(取得エラー: ' + _errStr(e) + ')';
+  }
 }
 
 /**
