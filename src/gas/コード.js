@@ -541,7 +541,6 @@ function deleteDeliveredImages() {
   var folderId = _getRequiredProp('IMAGE_FOLDER_ID');
   L('▼ deleteDeliveredImages 開始');
   L('IMAGE_FOLDER_ID = ' + folderId);
-  L('実行ユーザー(有効) = ' + _safe(function() { return Session.getEffectiveUser().getEmail(); }));
 
   var folder;
   try {
