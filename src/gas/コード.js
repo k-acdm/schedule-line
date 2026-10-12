@@ -191,49 +191,104 @@ function _normalizeName(s) {
 // 【段階2】配信対象の照合
 // ============================================
 
+/** 配信先モード（管理画面のラジオボタン値） */
+var DELIVERY_MODES = {
+  guardian: '保護者のみ',
+  student: '生徒のみ',
+  both: '保護者＋生徒 両方'
+};
+var DELIVERY_MODE_DEFAULT = 'both';
+
+/** LINE push 1回あたりの最大メッセージ数（API仕様） */
+var LINE_MAX_MESSAGES_PER_PUSH = 5;
+
+/** 共通画像の判定：ファイル名がアンダースコアで始まるJPG（例：_common1.jpg） */
+var COMMON_IMAGE_PREFIX = '_';
+
 /**
  * 配信対象の一覧を返す（管理画面から google.script.run で呼ばれる）。
  * プライバシー配慮のため、LINE_USER_ID の実値と fileId は返さず「有無(boolean)」のみ返す。
- * @return {{targets: Object[], warnings: Object[], summary: Object}}
+ * @param {string=} mode - 'guardian' | 'student' | 'both'（省略時 both）
+ * @return {{targets: Object[], warnings: Object[], commons: Object[], summary: Object}}
  */
-function getDeliveryTargets() {
-  var d = _computeDelivery();
+function getDeliveryTargets(mode) {
+  var d = _computeDelivery(mode);
   return {
     targets: d.targets.map(_sanitizeRecord),
     warnings: d.warnings.map(_sanitizeRecord),
+    commons: d.commons.map(function(c) { return { fileName: c.fileName }; }),
     summary: d.summary
   };
 }
 
 /**
+ * 配信先モードを検証・正規化する。省略時は既定（both）。
+ * @param {string=} mode
+ * @return {string}
+ */
+function _normalizeMode(mode) {
+  if (mode == null || mode === '') return DELIVERY_MODE_DEFAULT;
+  if (!DELIVERY_MODES.hasOwnProperty(mode)) {
+    throw new Error('配信先の指定が不正です: ' + mode);
+  }
+  return mode;
+}
+
+/**
  * 配信計算の中核（サーバー内部用。実IDと fileId を含む）。
  *
- * IMAGE_FOLDER_ID 内の全JPGを走査し、ファイル名（拡張子除く）を生徒氏名として
- * Recipients シートと照合（氏名はスペース無視）。以下に分類する。
- *   a) JPGあり + マッチ + 在籍TRUE + ID1つ以上 → 配信対象（正常）      status='ok'
- *   b) JPGあり + マッチしない                    → 警告「対応表に氏名なし」 status='nomatch'
- *   c) JPGあり + マッチ + 在籍FALSE              → スキップ「在籍フラグFALSE」status='notenrolled'
- *   d) JPGあり + マッチ + 在籍TRUE + ID両方空     → 警告「送信先ID未登録」   status='noid'
+ * IMAGE_FOLDER_ID 内の全JPGを走査する。
+ *   - 「_」で始まるJPG → 共通画像（個別照合の対象外。ファイル名の自然順で並べる）
+ *   - それ以外のJPG    → ファイル名（拡張子除く）を生徒氏名として共有シート（Students）と照合
  *
- * 送信予定通数：生徒本人ID・保護者ID（空でないもの）を重複除去したユニークID数。
- *   - 各生徒の sendCount は当該生徒内のユニーク数
- *   - summary.totalMessages は配信対象（正常）全体でのユニークID数（全体重複除去）
+ * 個別画像の分類：
+ *   a) マッチ + 在籍TRUE + 家族の配信有効 + 選択した配信先にID1つ以上 → 配信対象  status='ok'
+ *   b) マッチしない                          → 警告「対応表に氏名なし」          status='nomatch'
+ *   e) 同名の生徒がStudentsに複数            → 警告「対応表に同名の生徒が複数」  status='dupname'
+ *   c) 在籍FALSE                             → スキップ「在籍フラグFALSE」        status='notenrolled'
+ *   f) 家族の配信有効フラグFALSE             → スキップ（家族全員）              status='familydisabled'
+ *   d) 選択した配信先のIDがすべて空          → 警告「送信先ID未登録」            status='noid'
  *
- * @return {{targets: Object[], warnings: Object[], summary: Object}}
+ * 配信先モード：
+ *   guardian … 保護者IDのみ / student … 生徒IDのみ / both … 両方
+ *   空欄IDはその側だけスキップ（例：両方モードで生徒ID空 → 保護者にのみ届く）。
+ *   スキップした側は studentSkipped / guardianSkipped でプレビューに表示する。
+ *
+ * 送信単位（sends）：
+ *   同一 LINE_USER_ID には1回の配信にまとめる（重複除去）。
+ *   兄弟で保護者IDが同じ場合は、その保護者宛の1回の配信に兄弟全員の個別画像を
+ *   兄弟順位の順で含める（あいさつ文・共通画像は1回だけ）。
+ *   summary.totalMessages = 送信先（ユニークID）数
+ *   summary.pushCount     = LINE push の総回数（5件超は分割されるため ≧ totalMessages）
+ *
+ * @param {string=} mode
+ * @return {{targets: Object[], warnings: Object[], commons: Object[], sends: Object[], mode: string, summary: Object}}
  */
-function _computeDelivery() {
+function _computeDelivery(mode) {
+  mode = _normalizeMode(mode);
+  var wantStudent = (mode !== 'guardian');
+  var wantGuardian = (mode !== 'student');
+
   var folder = DriveApp.getFolderById(_getRequiredProp('IMAGE_FOLDER_ID'));
   var recipients = _getRecipientsMap();
 
   var targets = [];
   var warnings = [];
-  var globalIds = {}; // 配信対象全体のユニークID集合
+  var commons = [];
+  var jpgCount = 0;
 
   var files = folder.getFiles();
   while (files.hasNext()) {
     var file = files.next();
     var parsed = _parseFileName(file.getName());
     if (!parsed) continue; // JPG以外はスキップ
+    jpgCount++;
+
+    // 共通画像（個別照合の対象外）
+    if (_isCommonImageName(file.getName())) {
+      commons.push({ fileName: file.getName(), fileId: file.getId() });
+      continue;
+    }
 
     var key = _normalizeName(parsed.base);
     var rec = recipients[key];
@@ -247,6 +302,13 @@ function _computeDelivery() {
       hasStudentId: false,
       hasGuardianId: false,
       enrolled: false,
+      familyFound: false,
+      siblingOrder: 0,
+      sendStudent: false,
+      sendGuardian: false,
+      studentSkipped: false,
+      guardianSkipped: false,
+      bundledWith: [],
       sendCount: 0,
       status: '',
       message: ''
@@ -265,6 +327,16 @@ function _computeDelivery() {
     record.hasStudentId = rec.studentId !== '';
     record.hasGuardianId = rec.guardianId !== '';
     record.enrolled = rec.enrolled;
+    record.familyFound = rec.familyFound;
+    record.siblingOrder = rec.siblingOrder;
+
+    // e) 同名の生徒が複数（どちらに送るべきか判断できないため配信しない）
+    if (rec.duplicate) {
+      record.status = 'dupname';
+      record.message = '対応表に同名の生徒が複数';
+      warnings.push(record);
+      continue;
+    }
 
     // c) 在籍FALSE
     if (!rec.enrolled) {
@@ -274,8 +346,22 @@ function _computeDelivery() {
       continue;
     }
 
-    // d) ID両方空
-    if (rec.studentId === '' && rec.guardianId === '') {
+    // f) 家族の配信有効フラグFALSE（家族全員スキップ）
+    if (rec.familyFound && !rec.familyEnabled) {
+      record.status = 'familydisabled';
+      record.message = '配信有効フラグFALSE（家族）';
+      warnings.push(record);
+      continue;
+    }
+
+    // 選択した配信先ごとの送信可否（空欄IDはその側だけスキップ）
+    record.sendStudent = wantStudent && record.hasStudentId;
+    record.sendGuardian = wantGuardian && record.hasGuardianId;
+    record.studentSkipped = wantStudent && !record.hasStudentId;
+    record.guardianSkipped = wantGuardian && !record.hasGuardianId;
+
+    // d) 選択した配信先のIDがすべて空
+    if (!record.sendStudent && !record.sendGuardian) {
       record.status = 'noid';
       record.message = '送信先ID未登録';
       warnings.push(record);
@@ -284,8 +370,8 @@ function _computeDelivery() {
 
     // a) 配信対象（正常）
     var ids = {};
-    if (rec.studentId !== '') { ids[rec.studentId] = true; globalIds[rec.studentId] = true; }
-    if (rec.guardianId !== '') { ids[rec.guardianId] = true; globalIds[rec.guardianId] = true; }
+    if (record.sendStudent) ids[record.studentId] = true;
+    if (record.sendGuardian) ids[record.guardianId] = true;
     record.sendCount = Object.keys(ids).length;
     record.status = 'ok';
     record.message = '配信対象';
@@ -294,16 +380,110 @@ function _computeDelivery() {
 
   targets.sort(_byName);
   warnings.sort(_byName);
+  commons.sort(function(a, b) { return _naturalCompare(a.fileName, b.fileName); });
+
+  var sends = _buildSendUnits(targets, commons);
+
+  // 兄弟まとめ表示用：同じ送信先に含まれる他の生徒名
+  sends.forEach(function(s) {
+    if (s.items.length < 2) return;
+    s.items.forEach(function(item) {
+      item.record.bundledWith = item.record.bundledWith.concat(
+        s.items.filter(function(o) { return o !== item; }).map(function(o) { return o.record.name; })
+      ).filter(function(n, i, arr) { return arr.indexOf(n) === i; });
+    });
+  });
+
+  var pushCount = 0;
+  sends.forEach(function(s) { pushCount += s.chunkCount; });
 
   return {
     targets: targets,
     warnings: warnings,
+    commons: commons,
+    sends: sends,
+    mode: mode,
     summary: {
+      mode: mode,
+      modeLabel: DELIVERY_MODES[mode],
       deliverCount: targets.length,
-      totalMessages: Object.keys(globalIds).length,
-      warningCount: warnings.length
+      totalMessages: sends.length,
+      pushCount: pushCount,
+      commonCount: commons.length,
+      warningCount: warnings.length,
+      imageCount: jpgCount // フォルダ内JPG総数（共通画像含む。削除確認の枚数表示用）
     }
   };
+}
+
+/**
+ * 配信対象から送信単位（ユニークな LINE_USER_ID ごと）を組み立てる。
+ * 同一IDに複数の生徒が紐づく場合（兄弟の保護者など）は1単位にまとめ、
+ * 個別画像は兄弟順位 → 氏名の順に並べる。
+ * @param {Object[]} targets - 氏名順にソート済みの配信対象
+ * @param {Object[]} commons - 自然順にソート済みの共通画像
+ * @return {Object[]} { userId, items:[{record}], fileIds:string[], chunkCount:number }
+ */
+function _buildSendUnits(targets, commons) {
+  var byId = {};
+  var units = [];
+  targets.forEach(function(t) {
+    var ids = [];
+    if (t.sendStudent) ids.push(t.studentId);
+    if (t.sendGuardian && ids.indexOf(t.guardianId) === -1) ids.push(t.guardianId);
+    ids.forEach(function(id) {
+      var u = byId[id];
+      if (!u) {
+        u = { userId: id, items: [] };
+        byId[id] = u;
+        units.push(u);
+      }
+      if (!u.items.some(function(it) { return it.record.fileId === t.fileId; })) {
+        u.items.push({ record: t });
+      }
+    });
+  });
+
+  var commonIds = commons.map(function(c) { return c.fileId; });
+  units.forEach(function(u) {
+    u.items.sort(function(a, b) {
+      var d = a.record.siblingOrder - b.record.siblingOrder;
+      return d !== 0 ? d : _byName(a.record, b.record);
+    });
+    u.fileIds = u.items.map(function(it) { return it.record.fileId; });
+    u.commonIds = commonIds;
+    // あいさつ文1 + 個別 + 共通 を5件ずつに分割した回数
+    u.chunkCount = Math.ceil((1 + u.fileIds.length + commonIds.length) / LINE_MAX_MESSAGES_PER_PUSH);
+  });
+  return units;
+}
+
+/**
+ * 共通画像のファイル名か（アンダースコア始まり）。
+ * @param {string} fileName
+ * @return {boolean}
+ */
+function _isCommonImageName(fileName) {
+  return String(fileName).indexOf(COMMON_IMAGE_PREFIX) === 0;
+}
+
+/**
+ * 自然順比較（_common2 < _common10）。
+ * @param {string} a
+ * @param {string} b
+ * @return {number}
+ */
+function _naturalCompare(a, b) {
+  var ra = String(a).match(/(\d+|\D+)/g) || [];
+  var rb = String(b).match(/(\d+|\D+)/g) || [];
+  for (var i = 0; i < Math.min(ra.length, rb.length); i++) {
+    var x = ra[i], y = rb[i];
+    if (x === y) continue;
+    var nx = /^\d+$/.test(x), ny = /^\d+$/.test(y);
+    if (nx && ny) return Number(x) - Number(y);
+    return x < y ? -1 : 1;
+  }
+  return ra.length - rb.length;
 }
 
 /**
@@ -318,6 +498,12 @@ function _sanitizeRecord(r) {
     hasStudentId: r.hasStudentId,
     hasGuardianId: r.hasGuardianId,
     enrolled: r.enrolled,
+    familyFound: r.familyFound,
+    sendStudent: r.sendStudent,
+    sendGuardian: r.sendGuardian,
+    studentSkipped: r.studentSkipped,
+    guardianSkipped: r.guardianSkipped,
+    bundledWith: r.bundledWith,
     sendCount: r.sendCount,
     status: r.status,
     message: r.message
@@ -325,32 +511,87 @@ function _sanitizeRecord(r) {
 }
 
 /**
- * Recipients シートを読み、正規化氏名 → レコードの map を返す。
- *   A:生徒氏名 B:生徒LINE_USER_ID C:保護者LINE_USER_ID D:在籍フラグ
- * @return {Object.<string, {name:string, studentId:string, guardianId:string, enrolled:boolean}>}
+ * 共有スプレッドシート line-recipients（RECIPIENTS_SPREADSHEET_ID）を読み、
+ * 正規化氏名 → レコードの map を返す。列はヘッダ名で特定する（列順の変更に強い）。
+ *   Families：家族ID | 宛名 | 配信区分 | 保護者LINE_USER_ID | 登録日 | 配信有効フラグ
+ *   Students：生徒ID | 家族ID | 学年 | 生徒氏名 | 兄弟順位 | 在籍フラグ | 生徒LINE_USER_ID
+ * Students を家族IDで Families と結合し、生徒ごとの保護者LINE_USER_ID を得る。
+ * ※ 配信区分は参照しない（配信先は管理画面で毎回選択する）。
+ * ※ 旧 SPREADSHEET_ID（schedule-line-data / Recipients シート）は参照しない。
+ * @return {Object.<string, {name:string, studentId:string, guardianId:string, enrolled:boolean,
+ *          familyFound:boolean, familyEnabled:boolean, siblingOrder:number, duplicate:boolean}>}
  */
 function _getRecipientsMap() {
-  var ss = SpreadsheetApp.openById(_getRequiredProp('SPREADSHEET_ID'));
-  var sheet = ss.getSheetByName('Recipients');
-  if (!sheet) {
-    throw new Error('スプレッドシートに「Recipients」シートが見つかりません。');
-  }
-  var map = {};
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return map; // ヘッダのみ／空
+  var ss = SpreadsheetApp.openById(_getRequiredProp('RECIPIENTS_SPREADSHEET_ID'));
 
-  var values = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
-  for (var i = 0; i < values.length; i++) {
-    var name = values[i][0];
-    if (name === '' || name == null) continue;
-    map[_normalizeName(name)] = {
-      name: String(name).trim(),
-      studentId: _trim(values[i][1]),
-      guardianId: _trim(values[i][2]),
-      enrolled: _isEnrolled(values[i][3])
+  // Families：家族ID → { guardianId, enabled }
+  var families = {};
+  var fam = _readSheetByHeader(ss, 'Families', ['家族ID', '保護者LINE_USER_ID', '配信有効フラグ']);
+  fam.rows.forEach(function(row) {
+    var fid = _trim(row[fam.col['家族ID']]);
+    if (!fid) return;
+    families[fid] = {
+      guardianId: _trim(row[fam.col['保護者LINE_USER_ID']]),
+      enabled: _isEnrolled(row[fam.col['配信有効フラグ']])
     };
-  }
+  });
+
+  // Students：正規化氏名 → レコード
+  var map = {};
+  var st = _readSheetByHeader(ss, 'Students',
+    ['生徒ID', '家族ID', '生徒氏名', '兄弟順位', '在籍フラグ', '生徒LINE_USER_ID']);
+  st.rows.forEach(function(row) {
+    var name = row[st.col['生徒氏名']];
+    if (name === '' || name == null) return;
+    var key = _normalizeName(name);
+    if (!key) return;
+    if (map[key]) { map[key].duplicate = true; return; }
+    var family = families[_trim(row[st.col['家族ID']])];
+    var order = Number(row[st.col['兄弟順位']]);
+    map[key] = {
+      name: String(name).trim(),
+      studentId: _trim(row[st.col['生徒LINE_USER_ID']]),
+      guardianId: family ? family.guardianId : '',
+      enrolled: _isEnrolled(row[st.col['在籍フラグ']]),
+      familyFound: !!family,
+      familyEnabled: family ? family.enabled : false,
+      siblingOrder: (row[st.col['兄弟順位']] === '' || isNaN(order)) ? 999 : order,
+      duplicate: false
+    };
+  });
   return map;
+}
+
+/**
+ * シートを1行目ヘッダで読み、必須列の列番号と2行目以降のデータを返す。
+ * ヘッダ照合は空白を無視する。
+ * @param {Spreadsheet} ss
+ * @param {string} sheetName
+ * @param {string[]} required - 必須ヘッダ名
+ * @return {{col: Object.<string, number>, rows: Array[]}}
+ */
+function _readSheetByHeader(ss, sheetName, required) {
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    throw new Error('共有スプレッドシートに「' + sheetName + '」シートが見つかりません。');
+  }
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 1 || lastCol < 1) {
+    throw new Error('「' + sheetName + '」シートにヘッダ行がありません。');
+  }
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  var header = values[0].map(function(h) { return _normalizeName(h); });
+  var col = {};
+  var missing = [];
+  required.forEach(function(name) {
+    var idx = header.indexOf(_normalizeName(name));
+    if (idx === -1) missing.push(name); else col[name] = idx;
+  });
+  if (missing.length) {
+    throw new Error('「' + sheetName + '」シートに列が見つかりません: ' + missing.join(', '));
+  }
+  return { col: col, rows: values.slice(1) };
 }
 
 /**
@@ -422,13 +663,16 @@ function _escapeHtml(s) {
 // ============================================
 
 /**
- * テスト配信：配信対象の先頭1名分の画像を、ADMIN_LINE_USER_ID（ふくちさん）宛に送る。
+ * テスト配信：選択した配信先モードで組み立てた送信リストの「先頭1件分」を、
+ * ADMIN_LINE_USER_ID（ふくちさん）宛にそのまま送る（兄弟まとめ・5件超の分割も本番と同じ）。
  * 全員には送らない。あいさつ文の冒頭に「🧪 テスト配信」を付与する。
  *
  * @param {string} greetingText - あいさつ文
- * @return {{success:boolean, name?:string, fileName?:string, error?:string}}
+ * @param {string=} mode - 'guardian' | 'student' | 'both'（省略時 both）
+ * @return {{success:boolean, names?:string[], fileNames?:string[], commonCount?:number,
+ *           pushCount?:number, modeLabel?:string, error?:string}}
  */
-function testSendSchedule(greetingText) {
+function testSendSchedule(greetingText, mode) {
   var greeting = _trim(greetingText);
   if (!greeting) {
     return { success: false, error: 'あいさつ文を入力してください。' };
@@ -436,74 +680,69 @@ function testSendSchedule(greetingText) {
 
   var adminId = _getRequiredProp('ADMIN_LINE_USER_ID');
 
-  var d = _computeDelivery();
-  if (d.targets.length === 0) {
+  var d = _computeDelivery(mode);
+  if (d.sends.length === 0) {
     return { success: false, error: '配信対象がいません（テスト送信できません）。' };
   }
 
-  var first = d.targets[0];
+  var first = d.sends[0];
   var testGreeting = '🧪 テスト配信\n' + greeting;
-  var messages = _buildScheduleMessages(testGreeting, first.fileId);
-  var res = _pushLineMessages(adminId, messages);
+  var chunks = _buildScheduleMessageChunks(testGreeting, first.fileIds, first.commonIds);
+  var res = _pushLineMessageChunks(adminId, chunks);
 
   return {
     success: res.success,
-    name: first.name,
-    fileName: first.fileName,
+    names: first.items.map(function(it) { return it.record.name; }),
+    fileNames: first.items.map(function(it) { return it.record.fileName; }),
+    commonCount: first.commonIds.length,
+    pushCount: chunks.length,
+    modeLabel: d.summary.modeLabel,
     error: res.success ? undefined : res.error
   };
 }
 
 /**
- * 本配信：配信対象の各生徒について、生徒本人ID＋保護者ID（空でないもの）へ
- * 「あいさつ文 → その生徒の画像」を送信する。
+ * 本配信：選択した配信先モードで、送信先（ユニークな LINE_USER_ID）ごとに
+ * 「あいさつ文 → 個別画像（兄弟がいれば兄弟順位順）→ 共通画像（ファイル名の自然順）」を送る。
+ * 5メッセージを超える場合は複数回の push に分割する（あいさつ文は最初の push のみ）。
  *
- * 【重複除去】1つの LINE_USER_ID には（全体を通して）1回だけ送る。
- *   - 生徒本人と保護者は別IDなので、それぞれにその生徒の画像が届く
- *   - 万一、全体で同一IDが複数回登場した場合は、最初に登場した1回のみ送る
- *     （＝ そのIDに紐づく最初の生徒の画像を送る）
- *   - 送信通数 = 全体でのユニークID数（getDeliveryTargets の totalMessages と一致）
+ * 【重複除去】1つの LINE_USER_ID には1回の配信だけ（_buildSendUnits でまとめ済み）。
+ *   - 送信通数 = 送信先数（getDeliveryTargets の totalMessages と一致）
  *
  * @param {string} greetingText - あいさつ文（必須）
- * @return {{total:number, success:number, failed:number, errors:string[], targetCount:number}}
+ * @param {string=} mode - 'guardian' | 'student' | 'both'（省略時 both）
+ * @return {{total:number, success:number, failed:number, errors:string[], targetCount:number,
+ *           pushTotal:number, imageCount:number, commonCount:number, modeLabel:string}}
  */
-function executeScheduleDelivery(greetingText) {
+function executeScheduleDelivery(greetingText, mode) {
   var greeting = _trim(greetingText);
   if (!greeting) {
     throw new Error('あいさつ文を入力してください（本配信には必須です）。');
   }
 
-  var d = _computeDelivery();
-  if (d.targets.length === 0) {
+  var d = _computeDelivery(mode);
+  if (d.sends.length === 0) {
     throw new Error('配信対象がいません。本配信を中止しました。');
   }
 
-  // 送信リストを構築（全体でユニークIDに絞る。登場順で最初の1回のみ）
-  var seen = {};
-  var sends = []; // { userId, name, fileId }
-  d.targets.forEach(function(t) {
-    [t.studentId, t.guardianId].forEach(function(id) {
-      if (id && !seen[id]) {
-        seen[id] = true;
-        sends.push({ userId: id, name: t.name, fileId: t.fileId });
-      }
-    });
-  });
-
+  var sends = d.sends;
   var total = sends.length;
   var success = 0;
   var failed = 0;
   var errors = [];
+  var pushTotal = 0;
 
   for (var i = 0; i < sends.length; i++) {
     var s = sends[i];
-    var messages = _buildScheduleMessages(greeting, s.fileId);
-    var res = _pushLineMessages(s.userId, messages);
+    var label = s.items.map(function(it) { return it.record.name; }).join('・');
+    var chunks = _buildScheduleMessageChunks(greeting, s.fileIds, s.commonIds);
+    var res = _pushLineMessageChunks(s.userId, chunks);
+    pushTotal += res.pushed;
     if (res.success) {
       success++;
     } else {
       failed++;
-      errors.push(s.name + ': ' + (res.error || '不明なエラー'));
+      errors.push(label + ': ' + (res.error || '不明なエラー'));
     }
     // レート制限緩和（最後の1件の後はスリープ不要）
     if (i < sends.length - 1) {
@@ -517,13 +756,17 @@ function executeScheduleDelivery(greetingText) {
     failed: failed,
     errors: errors,
     targetCount: d.targets.length,
-    imageCount: d.targets.length + d.warnings.length // フォルダ内JPG総数（削除確認の枚数表示用）
+    pushTotal: pushTotal,
+    imageCount: d.summary.imageCount, // フォルダ内JPG総数（共通画像含む。削除確認の枚数表示用）
+    commonCount: d.summary.commonCount,
+    modeLabel: d.summary.modeLabel
   };
 }
 
 /**
  * 【段階4】配信済み画像の削除。
  * IMAGE_FOLDER_ID フォルダ内の JPG のみをゴミ箱へ移動する（復元可能）。
+ * 共通画像（_common1.jpg 等）もJPGなので、個別画像と一緒に削除対象に含まれる。
  *
  * 安全策：
  *   - JPG（.jpg/.jpeg 等）以外のファイルは絶対に削除しない
@@ -627,24 +870,51 @@ function _safe(fn) {
 }
 
 /**
- * 「あいさつ文 → 画像」の2メッセージ配列を組み立てる。
+ * 「あいさつ文 → 個別画像 → 共通画像」のメッセージ列を組み立て、
+ * LINE push 1回あたりの上限（5件）ごとに分割して返す。
+ * あいさつ文は先頭なので、必ず最初の push にのみ含まれる。
  * 画像URLは段階1で確定した公開画像URL（lh3/thumbnail 直リンク）を使用する。
  * ※ ?image= はHTMLプレビューを返すためLINEには使えない。fileId から直URLを生成する。
  *
  * @param {string} greeting - 本文（テスト時は冒頭に🧪付与済み）
- * @param {string} fileId
- * @return {Object[]} LINE messages
+ * @param {string[]} fileIds - 個別画像の fileId（兄弟順位順）
+ * @param {string[]} commonIds - 共通画像の fileId（ファイル名の自然順）
+ * @return {Object[][]} LINE messages の配列（push 単位）
  */
-function _buildScheduleMessages(greeting, fileId) {
-  var urls = _buildImageUrls(fileId);
-  return [
-    { type: 'text', text: greeting },
-    {
+function _buildScheduleMessageChunks(greeting, fileIds, commonIds) {
+  var messages = [{ type: 'text', text: greeting }];
+  fileIds.concat(commonIds || []).forEach(function(fileId) {
+    var urls = _buildImageUrls(fileId);
+    messages.push({
       type: 'image',
       originalContentUrl: urls.originalContentUrl,
       previewImageUrl: urls.previewImageUrl
+    });
+  });
+  var chunks = [];
+  for (var i = 0; i < messages.length; i += LINE_MAX_MESSAGES_PER_PUSH) {
+    chunks.push(messages.slice(i, i + LINE_MAX_MESSAGES_PER_PUSH));
+  }
+  return chunks;
+}
+
+/**
+ * 分割済みメッセージを1宛先へ順に push する。
+ * 途中で失敗した場合は、順序が崩れないよう残りの push を中止する。
+ * @param {string} userId
+ * @param {Object[][]} chunks
+ * @return {{success:boolean, pushed:number, error?:string}}
+ */
+function _pushLineMessageChunks(userId, chunks) {
+  for (var i = 0; i < chunks.length; i++) {
+    if (i > 0) Utilities.sleep(300);
+    var res = _pushLineMessages(userId, chunks[i]);
+    if (!res.success) {
+      var where = chunks.length > 1 ? '（' + (i + 1) + '/' + chunks.length + '回目のpushで失敗。以降は未送信）' : '';
+      return { success: false, pushed: i, error: (res.error || '不明なエラー') + where };
     }
-  ];
+  }
+  return { success: true, pushed: chunks.length };
 }
 
 /**

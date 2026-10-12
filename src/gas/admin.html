@@ -162,14 +162,32 @@
   .badge-guardian { background: #fef5e7; color: #d68910; }
   .badge-none { background: #f0f0f0; color: #95a5a6; }
 
+  .badge-skip { background: #fff; color: #c0392b; border: 1px dashed #e6b0aa; }
+  .badge-common { background: #eafaf1; color: #1e8449; }
+  .bundle-note { font-size: 12px; color: #7f8c8d; margin-top: 4px; }
+
   .badge-nomatch { background: #fdecea; color: #c0392b; }
+  .badge-dupname { background: #fdecea; color: #c0392b; }
   .badge-noid { background: #fef5e7; color: #d68910; }
   .badge-notenrolled { background: #eef0f1; color: #7f8c8d; }
+  .badge-familydisabled { background: #eef0f1; color: #7f8c8d; }
 
   .warn-section { }
   .warn-nomatch td:first-child { box-shadow: inset 3px 0 0 #e74c3c; }
+  .warn-dupname td:first-child { box-shadow: inset 3px 0 0 #e74c3c; }
   .warn-noid td:first-child { box-shadow: inset 3px 0 0 #e67e22; }
   .warn-notenrolled td:first-child { box-shadow: inset 3px 0 0 #bdc3c7; }
+  .warn-familydisabled td:first-child { box-shadow: inset 3px 0 0 #bdc3c7; }
+
+  /* 配信先選択 */
+  .mode-row {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    font-size: 14px;
+  }
+  .mode-row label { cursor: pointer; }
+  .mode-row input { margin-right: 6px; }
 
   .loading {
     text-align: center;
@@ -206,11 +224,21 @@
     <textarea id="greeting" placeholder="保護者・生徒の皆様&#10;新しい授業日程表をお送りします。ご確認ください。"></textarea>
   </div>
 
+  <!-- 配信先選択（テスト配信・本配信の両方に反映） -->
+  <div class="card">
+    <span class="field-label">配信先</span>
+    <div class="mode-row">
+      <label><input type="radio" name="mode" value="guardian" onchange="onModeChange()">保護者のみ</label>
+      <label><input type="radio" name="mode" value="student" onchange="onModeChange()">生徒のみ</label>
+      <label><input type="radio" name="mode" value="both" onchange="onModeChange()" checked>保護者＋生徒 両方</label>
+    </div>
+  </div>
+
   <!-- プレビュー操作 -->
   <div class="card">
     <div class="btn-row">
       <button class="btn" id="previewBtn" onclick="loadTargets()">配信対象プレビュー</button>
-      <span class="hint">画像フォルダのJPGとRecipientsシートを照合します（この段階では配信しません）。</span>
+      <span class="hint">画像フォルダのJPGと共有シート（line-recipients）を照合します（この段階では配信しません）。「_」で始まるJPGは全員共通画像として扱います。</span>
     </div>
   </div>
 
@@ -222,26 +250,40 @@
     <div class="btn-row">
       <button class="btn btn-secondary" id="testBtn" onclick="testSend()">🧪 テスト配信</button>
       <button class="btn btn-danger" id="realBtn" onclick="executeReal()">🚀 本配信</button>
-      <span class="hint">テスト配信は先頭1名分をふくちさんのLINEにのみ送ります。本配信は配信対象全員へ実際に送信します。</span>
+      <span class="hint">テスト配信は選択した配信先での先頭1件分をふくちさんのLINEにのみ送ります。本配信は配信対象全員へ実際に送信します。</span>
     </div>
   </div>
 
 <script>
+  var MODE_LABELS = { guardian: '保護者のみ', student: '生徒のみ', both: '保護者＋生徒 両方' };
+  var previewShown = false; // プレビュー表示中なら配信先切替で自動再取得
+
+  function getMode() {
+    var el = document.querySelector('input[name="mode"]:checked');
+    return el ? el.value : 'both';
+  }
+
+  function onModeChange() {
+    if (previewShown) loadTargets();
+  }
+
   function loadTargets() {
     var btn = document.getElementById('previewBtn');
     btn.disabled = true;
+    previewShown = false;
     document.getElementById('result').innerHTML =
       '<div class="loading">照合中…</div>';
     google.script.run
       .withSuccessHandler(function(data) {
         btn.disabled = false;
         renderResult(data);
+        previewShown = true;
       })
       .withFailureHandler(function(err) {
         btn.disabled = false;
         renderError(err);
       })
-      .getDeliveryTargets();
+      .getDeliveryTargets(getMode());
   }
 
   function renderError(err) {
@@ -255,14 +297,34 @@
     var html = '';
 
     // サマリー
-    html += '<div class="card"><div class="summary">' +
+    html += '<div class="card"><p class="hint" style="margin:0 0 10px;">配信先：<b>' +
+      escapeHtml(s.modeLabel) + '</b></p><div class="summary">' +
       '<div class="summary-item"><span class="summary-label">配信対象</span>' +
         '<span class="summary-value ok">' + s.deliverCount + '</span> 名</div>' +
       '<div class="summary-item"><span class="summary-label">送信予定</span>' +
         '<span class="summary-value msg">' + s.totalMessages + '</span> 通</div>' +
+      '<div class="summary-item"><span class="summary-label">共通画像</span>' +
+        '<span class="summary-value">' + s.commonCount + '</span> 枚</div>' +
       '<div class="summary-item"><span class="summary-label">警告</span>' +
         '<span class="summary-value warn">' + s.warningCount + '</span> 件</div>' +
-      '</div></div>';
+      '</div>';
+    if (s.pushCount > s.totalMessages) {
+      html += '<p class="hint" style="margin:10px 0 0;">※ 1通あたり5件（あいさつ文＋画像）を超える送信先は分割して送ります（push 合計 ' +
+        s.pushCount + ' 回）。</p>';
+    }
+    html += '</div>';
+
+    // 共通画像（全員に送信）
+    html += '<h2>全員共通画像（' + data.commons.length + '枚）</h2>';
+    if (data.commons.length === 0) {
+      html += '<div class="empty">共通画像はありません（個別画像のみ送信します）。</div>';
+    } else {
+      html += '<div class="card">';
+      data.commons.forEach(function(c, i) {
+        html += '<span class="badge badge-common">' + (i + 1) + '. ' + escapeHtml(c.fileName) + '</span> ';
+      });
+      html += '<p class="hint" style="margin:8px 0 0;">各送信先へ、個別画像の後にこの順で送ります。</p></div>';
+    }
 
     // 配信対象（正常）
     html += '<h2>配信対象（' + data.targets.length + '名）</h2>';
@@ -307,14 +369,22 @@
 
   function destBadges(t) {
     var out = '';
-    if (t.hasStudentId) out += '<span class="badge badge-student">生徒</span>';
-    if (t.hasGuardianId) out += '<span class="badge badge-guardian">保護者</span>';
+    if (t.sendStudent) out += '<span class="badge badge-student">生徒</span>';
+    if (t.sendGuardian) out += '<span class="badge badge-guardian">保護者</span>';
     if (!out) out = '<span class="badge badge-none">なし</span>';
+    if (t.studentSkipped) out += '<span class="badge badge-skip">生徒ID未登録→生徒はスキップ</span>';
+    if (t.guardianSkipped) {
+      out += '<span class="badge badge-skip">' +
+        (t.familyFound ? '保護者ID未登録' : '家族ID不一致') + '→保護者はスキップ</span>';
+    }
+    if (t.bundledWith && t.bundledWith.length) {
+      out += '<div class="bundle-note">兄弟まとめ送信：' + escapeHtml(t.bundledWith.join('・')) + '</div>';
+    }
     return out;
   }
 
   function idPresence(w) {
-    if (w.status === 'nomatch') return '<span class="badge badge-none">—</span>';
+    if (w.status === 'nomatch' || w.status === 'dupname') return '<span class="badge badge-none">—</span>';
     var out = '';
     out += w.hasStudentId
       ? '<span class="badge badge-student">生徒</span>'
@@ -329,11 +399,17 @@
     if (w.status === 'nomatch') {
       return '<span class="badge badge-nomatch">対応表に氏名なし</span>';
     }
+    if (w.status === 'dupname') {
+      return '<span class="badge badge-dupname">対応表に同名の生徒が複数</span>';
+    }
     if (w.status === 'noid') {
-      return '<span class="badge badge-noid">送信先ID未登録</span>';
+      return '<span class="badge badge-noid">送信先ID未登録（選択した配信先）</span>';
     }
     if (w.status === 'notenrolled') {
       return '<span class="badge badge-notenrolled">在籍FALSE（スキップ）</span>';
+    }
+    if (w.status === 'familydisabled') {
+      return '<span class="badge badge-familydisabled">配信有効FALSE（家族ごとスキップ）</span>';
     }
     return '<span class="badge badge-none">' + escapeHtml(w.message) + '</span>';
   }
@@ -346,14 +422,19 @@
   function testSend() {
     var greeting = getGreeting();
     if (!greeting) { alert('あいさつ文を入力してください。'); return; }
-    if (!confirm('配信対象の先頭1名分の画像を、\nふくちさんのLINEにテスト配信します。\n\nよろしいですか？')) return;
+    var mode = getMode();
+    if (!confirm('配信先「' + MODE_LABELS[mode] + '」での先頭1件分（個別画像＋共通画像）を、\n' +
+      'ふくちさんのLINEにテスト配信します。\n\nよろしいですか？')) return;
     var btn = document.getElementById('testBtn');
     btn.disabled = true;
     google.script.run
       .withSuccessHandler(function(res) {
         btn.disabled = false;
         if (res && res.success) {
-          alert('✅ テスト配信しました。\n対象: ' + res.name + '\n（' + res.fileName + '）\n\nふくちさんのLINEをご確認ください。');
+          alert('✅ テスト配信しました。（配信先：' + res.modeLabel + '）\n' +
+            '対象: ' + res.names.join('・') + '\n（' + res.fileNames.join(', ') + '）\n' +
+            '共通画像: ' + res.commonCount + '枚 ／ push ' + res.pushCount + '回\n\n' +
+            'ふくちさんのLINEをご確認ください。');
         } else {
           alert('❌ テスト配信に失敗しました。\n' + ((res && res.error) || '不明なエラー'));
         }
@@ -362,12 +443,13 @@
         btn.disabled = false;
         alert('❌ エラー: ' + ((err && err.message) ? err.message : err));
       })
-      .testSendSchedule(greeting);
+      .testSendSchedule(greeting, mode);
   }
 
   function executeReal() {
     var greeting = getGreeting();
     if (!greeting) { alert('あいさつ文を入力してください。'); return; }
+    var mode = getMode();
     var btn = document.getElementById('realBtn');
     btn.disabled = true;
 
@@ -381,8 +463,10 @@
           return;
         }
         var msg = '【本配信の事前確認】\n\n';
+        msg += '配信先：' + s.modeLabel + '\n';
         msg += '配信対象：' + s.deliverCount + '名\n';
         msg += '送信予定：' + s.totalMessages + '通\n';
+        msg += '共通画像：' + s.commonCount + '枚\n';
         if (s.warningCount > 0) msg += '警告：' + s.warningCount + '件（配信対象外）\n';
         msg += '\n⚠️ ' + s.totalMessages + '通を実際にLINE配信します。\n';
         msg += '配信したメッセージは取り消せません。\n\n';
@@ -396,6 +480,7 @@
           return;
         }
 
+        previewShown = false;
         document.getElementById('result').innerHTML =
           '<div class="loading">配信中…（' + s.totalMessages + '通）しばらくお待ちください。</div>';
         google.script.run
@@ -407,17 +492,20 @@
             btn.disabled = false;
             renderError(err);
           })
-          .executeScheduleDelivery(greeting);
+          .executeScheduleDelivery(greeting, mode);
       })
       .withFailureHandler(function(err) {
         btn.disabled = false;
         renderError(err);
       })
-      .getDeliveryTargets();
+      .getDeliveryTargets(mode);
   }
 
   function renderSendResult(r) {
-    var html = '<div class="card"><h2 style="margin-top:0;">配信結果</h2><div class="summary">' +
+    var html = '<div class="card"><h2 style="margin-top:0;">配信結果</h2>' +
+      '<p class="hint" style="margin:0 0 10px;">配信先：<b>' + escapeHtml(r.modeLabel || '') +
+      '</b> ／ 共通画像 ' + (r.commonCount || 0) + '枚 ／ push 合計 ' + (r.pushTotal || 0) + '回</p>' +
+      '<div class="summary">' +
       '<div class="summary-item"><span class="summary-label">総通数</span>' +
         '<span class="summary-value">' + r.total + '</span> 通</div>' +
       '<div class="summary-item"><span class="summary-label">成功</span>' +
@@ -435,7 +523,7 @@
     // 配信済み画像の削除ボタン（★本配信成功後にのみ表示。うっかり削除防止）
     if (r.success > 0) {
       html += '<div class="btn-row" style="margin-top:18px;padding-top:16px;border-top:1px solid #f0f0f0;">' +
-        '<button class="btn btn-danger" id="deleteBtn" onclick="deleteImages(' + (r.imageCount || 0) + ')">📁 配信済み画像を削除する</button>' +
+        '<button class="btn btn-danger" id="deleteBtn" onclick="deleteImages(' + (r.imageCount || 0) + ', ' + (r.commonCount || 0) + ')">📁 配信済み画像を削除する</button>' +
         '<span class="hint">配信が完了した日程表画像をゴミ箱へ移動します（復元可能）。</span>' +
         '</div>';
     }
@@ -445,8 +533,9 @@
   }
 
   // === 配信済み画像の削除（本配信成功後のみ） ===
-  function deleteImages(count) {
-    var msg = 'schedule-line-images フォルダ内の日程表画像（' + count + '枚）を削除します。\n' +
+  function deleteImages(count, commonCount) {
+    var msg = 'schedule-line-images フォルダ内の日程表画像（' + count + '枚' +
+      (commonCount ? '、うち共通画像 ' + commonCount + '枚' : '') + '）を削除します。\n' +
       '（ゴミ箱に移動するので、必要なら復元できます）\n\nよろしいですか？';
     if (!confirm(msg)) return;
     var btn = document.getElementById('deleteBtn');
