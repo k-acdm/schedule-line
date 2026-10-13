@@ -332,7 +332,7 @@
       html += '<div class="empty">配信対象がありません。</div>';
     } else {
       html += '<table><thead><tr>' +
-        '<th>氏名</th><th>画像ファイル</th><th>送信先</th><th style="text-align:center;">送信通数</th>' +
+        '<th>氏名</th><th>画像ファイル</th><th>送信先</th><th style="text-align:center;">この生徒に届く通数</th>' +
         '</tr></thead><tbody>';
       data.targets.forEach(function(t) {
         html += '<tr>' +
@@ -343,6 +343,15 @@
           '</tr>';
       });
       html += '</tbody></table>';
+      // 兄弟まとめがある場合のみ、列が per-生徒 集計でありサマリーと別物である旨を明示
+      var hasBundle = data.targets.some(function(t) { return t.bundledWith && t.bundledWith.length; });
+      if (hasBundle) {
+        html += '<p class="hint" style="margin:-16px 0 24px;">' +
+          '※「この生徒に届く通数」は各生徒の日程表が含まれる送信回数です。' +
+          '兄弟は保護者宛て1通を共有するため、この列の合計は上部の「送信予定（' +
+          s.totalMessages + '通）」より多くなることがあります。実際に送る回数は送信予定の通数です。' +
+          '</p>';
+      }
     }
 
     // 警告・スキップ
