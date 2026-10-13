@@ -369,10 +369,9 @@ function _computeDelivery(mode) {
     }
 
     // a) 配信対象（正常）
-    var ids = {};
-    if (record.sendStudent) ids[record.studentId] = true;
-    if (record.sendGuardian) ids[record.guardianId] = true;
-    record.sendCount = Object.keys(ids).length;
+    // ※ sendCount（行ごとの送信通数）は送信単位の組み立て後に算出する。
+    //    兄弟で共有する保護者宛てを各行で二重計上しないよう、
+    //    各ユニークID（＝送信単位）を1つの行にのみ計上する（下の _buildSendUnits 後の処理）。
     record.status = 'ok';
     record.message = '配信対象';
     targets.push(record);
@@ -392,6 +391,15 @@ function _computeDelivery(mode) {
         s.items.filter(function(o) { return o !== item; }).map(function(o) { return o.record.name; })
       ).filter(function(n, i, arr) { return arr.indexOf(n) === i; });
     });
+  });
+
+  // 行ごとの送信通数（sendCount）：各送信先（ユニークID＝1送信単位）を、
+  // その単位の先頭の行（items は兄弟順位→氏名でソート済み）にのみ1通計上する。
+  // これにより Σ(行の送信通数) === sends.length === summary.totalMessages が常に成立し、
+  // 兄弟で共有する保護者宛てが兄弟の各行に二重計上されることを防ぐ。
+  // ※ 実際の配信（sends の中身・順序・分割）には影響しない表示専用の集計。
+  sends.forEach(function(s) {
+    if (s.items.length) s.items[0].record.sendCount += 1;
   });
 
   var pushCount = 0;
