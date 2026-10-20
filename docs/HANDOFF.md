@@ -128,8 +128,19 @@
    - `clasp push` した後、デプロイ前に必ずエディタをF5リロードして最新コードを確認する。
 2. **`clasp push` 成功表示でもリモートHEADが旧版に戻ることがある**
    - 段階1で実際に発生。`clasp push` が「Pushed」と出てもリモートが旧版のままだった。
-   - 疑わしいときは一時フォルダへ `clasp pull` して中身を検証する。
-     （例：別ディレクトリに `.clasp.json` をコピー→`clasp pull`→grepで関数の有無を確認）
+   - **第一の検証手段は GASエディタ**：F5リロード → 対象の関数名を Ctrl+F で検索して存在を確認。
+     `clasp` を使わないので事故が起きない。まずこれで足りる。
+   - **★ 作業リポジトリ内では絶対に `clasp pull` を実行しない**
+     ローカルの最新コードが未デプロイの旧版で上書きされる。
+     （マイ活本体で実際に事故あり → 以降 `clasp push` の一方通行で運用）
+   - どうしても `clasp pull` で中身を確認したいときは、**リポジトリ外の捨てフォルダ限定**で：
+     ```bash
+     mkdir -p ~/tmp/clasp-verify && cd ~/tmp/clasp-verify
+     cp ~/schedule-line/src/gas/.clasp.json .   # ← コピーするだけ。作業ディレクトリでは pull しない
+     clasp pull
+     grep -n "確認したい関数名" *.js
+     cd ~ && rm -rf ~/tmp/clasp-verify          # ← 検証後に必ず削除（取り違え防止）
+     ```
 3. **スコープ変更後は再認証が必要**
    - 再認証ダイアログが出ない場合は、Google権限設定
      （https://myaccount.google.com/permissions）で schedule-line のアクセスを一旦削除
